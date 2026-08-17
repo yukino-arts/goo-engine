@@ -1,0 +1,137 @@
+name: Goo Engine 4.4 CI
+
+on:
+  push:
+    branches:
+      - goo-engine-v4.4-release
+  pull_request:
+    branches:
+      - goo-engine-v4.4-release
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: goo-engine-4.4-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GOO_ENGINE_BRANCH: goo-engine-v4.4-release
+  BLENDER_VERSION: 4.4.3
+  DEBIAN_FRONTEND: noninteractive
+
+jobs:
+  build-linux:
+    name: Build Goo Engine 4.4.3 - Linux x64
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout Goo Engine 4.4
+        uses: actions/checkout@v5
+        with:
+          ref: goo-engine-v4.4-release
+          fetch-depth: 0
+          submodules: false
+          lfs: false
+
+      - name: Install build tools
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            git \
+            git-lfs \
+            cmake \
+            ninja-build \
+            python3 \
+            python3-dev \
+            python3-pip \
+            pkg-config \
+            ccache \
+            patchelf \
+            libxi-dev \
+            libxrender-dev \
+            libxfixes-dev \
+            libx11-dev \
+            libxext-dev \
+            libxrandr-dev \
+            libxinerama-dev \
+            libxcursor-dev \
+            libwayland-dev \
+            libegl1-mesa-dev \
+            libgl1-mesa-dev
+
+          git lfs install --skip-repo
+
+      - name: Configure Git
+        shell: bash
+        run: |
+          set -euxo pipefail
+          git config --global advice.detachedHead false
+          git config --global core.longpaths true
+          git config --global protocol.version 2
+
+      - name: Fetch Goo Engine dependencies
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python3 ./build_files/utils/make_update.py --use-linux-libraries
+
+      - name: Configure ccache
+        shell: bash
+        run: |
+          echo "CCACHE_DIR=${{ github.workspace }}/.ccache" >> "$GITHUB_ENV"
+          ccache --version
+          ccache --zero-stats
+
+      - name: Cache compiler results
+        uses: actions/cache@v4
+        with:
+          path: .ccache
+          key: goo-engine-4.4-linux-${{ hashFiles('CMakeLists.txt', 'GNUmakefile', 'source/**') }}
+          restore-keys: |
+            goo-engine-4.4-linux-
+
+      - name: Build Goo Engine
+        shell: bash
+        env:
+          CCACHE_DIR: ${{ github.workspace }}/.ccache
+        run: |
+          set -euxo pipefail
+          make release ninja ccache NPROCS=$(nproc)
+
+      - name: Package Goo Engine
+        shell: bash
+        env:
+          CCACHE_DIR: ${{ github.workspace }}/.ccache
+        run: |
+          set -euxo pipefail
+          make package_archive ninja ccache NPROCS=$(nproc)
+
+          mkdir -p artifacts
+
+          find .. -maxdepth 4 -type f \
+            \( -name 'blender-4.4.3-*.tar.xz' -o -name 'blender-4.4.3-*.zip' \) \
+            -print -exec cp {} artifacts/ \;
+
+          if ! compgen -G 'artifacts/*' > /dev/null; then
+            echo "No packaged Goo Engine archive was found."
+            find .. -maxdepth 5 -type f -name 'blender*' -print | head -200 || true
+            exit 1
+          fi
+
+          sha256sum artifacts/* > artifacts/SHA256SUMS.txt
+          cat artifacts/SHA256SUMS.txt
+          ccache --show-stats || true
+
+      - name: Upload Linux build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: goo-engine-4.4.3-linux-x64
+          path: artifacts/*
+          if-no-files-found: error
+          retention-days: 14
