@@ -29,6 +29,10 @@ jobs:
     timeout-minutes: 360
 
     steps:
+      # ============================================================
+      # CHECKOUT
+      # ============================================================
+
       - name: Checkout Goo Engine 4.4
         uses: actions/checkout@v5
         with:
@@ -37,10 +41,18 @@ jobs:
           submodules: false
           lfs: false
 
+      # ============================================================
+      # GIT LFS
+      # ============================================================
+
       - name: Setup Git LFS
         shell: pwsh
         run: |
           git lfs install --skip-repo
+
+      # ============================================================
+      # GIT CONFIG
+      # ============================================================
 
       - name: Configure Git
         shell: pwsh
@@ -49,10 +61,20 @@ jobs:
           git config --global protocol.version 2
           git config --global core.longpaths true
 
+      # ============================================================
+      # VISUAL STUDIO
+      # ============================================================
+
       - name: Verify Visual Studio
         shell: pwsh
         run: |
           $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+
+          if (-not (Test-Path $vswhere)) {
+            throw "vswhere.exe was not found."
+          }
+
+          Write-Host "Visual Studio installation detected:"
 
           & $vswhere `
             -latest `
@@ -60,82 +82,395 @@ jobs:
             -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
             -property installationPath
 
+      # ============================================================
+      # DOWNLOAD LIBRARIES / DEPENDENCIES
+      # ============================================================
+
       - name: Fetch Goo Engine dependencies
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
+
           python .\build_files\utils\make_update.py
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "make_update.py failed."
+          }
+
+      # ============================================================
+      # BUILD
+      # ============================================================
 
       - name: Build Goo Engine
         shell: cmd
         run: |
-          setlocal
+          setlocal EnableExtensions EnableDelayedExpansion
+
+          echo ============================================================
+          echo Detecting Visual Studio
+          echo ============================================================
 
           for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do (
             set "VS_PATH=%%i"
           )
 
-          call "%VS_PATH%\VC\Auxiliary\Build\vcvars64.bat"
+          if not defined VS_PATH (
+            echo ERROR: Visual Studio installation was not found.
+            exit /b 1
+          )
 
+          echo Visual Studio:
+          echo !VS_PATH!
+
+          echo.
+          echo ============================================================
+          echo Initializing MSVC x64
+          echo ============================================================
+
+          call "!VS_PATH!\VC\Auxiliary\Build\vcvars64.bat"
+
+          if errorlevel 1 (
+            echo ERROR: Failed to initialize MSVC environment.
+            exit /b 1
+          )
+
+          echo.
+          echo ============================================================
+          echo Compiler
+          echo ============================================================
+
+          where cl
           cl
+
+          echo.
+          echo ============================================================
+          echo CMake
+          echo ============================================================
+
+          where cmake
           cmake --version
+
+          echo.
+          echo ============================================================
+          echo Ninja
+          echo ============================================================
+
+          where ninja
           ninja --version
+
+          echo.
+          echo ============================================================
+          echo Building Goo Engine 4.4.3
+          echo ============================================================
 
           call make.bat release ninja
 
-      - name: Package Goo Engine
-        shell: cmd
-        run: |
-          setlocal
-
-          for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do (
-            set "VS_PATH=%%i"
+          if errorlevel 1 (
+            echo ERROR: Goo Engine build failed.
+            exit /b 1
           )
 
-          call "%VS_PATH%\VC\Auxiliary\Build\vcvars64.bat"
+          echo.
+          echo ============================================================
+          echo Build completed successfully
+          echo ============================================================
 
-          call make.bat package
+      # ============================================================
+      # VERIFY BUILD OUTPUT
+      # ============================================================
 
-      - name: Find Windows package
+      - name: Verify build output
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path artifacts | Out-Null
+          $ErrorActionPreference = "Stop"
 
-          $packages = Get-ChildItem -Path . -Recurse -File |
-            Where-Object {
-              $_.Extension -eq ".zip" -and
-              $_.Name -match "blender|goo"
-            }
+          $buildDir = Join-Path `
+            $env:GITHUB_WORKSPACE `
+            "..\build_windows_Release_x64_vc17_Release"
 
-          if ($packages.Count -eq 0) {
-            Write-Host "No ZIP package was found."
+          $binDir = Join-Path $buildDir "bin"
+          $blenderExe = Join-Path $binDir "blender.exe"
 
-            Get-ChildItem -Path . -Recurse -File |
-              Where-Object {
-                $_.Extension -in ".exe", ".zip"
-              } |
+          Write-Host "Build directory:"
+          Write-Host $buildDir
+
+          Write-Host ""
+          Write-Host "Binary directory:"
+          Write-Host $binDir
+
+          if (-not (Test-Path $buildDir)) {
+            throw "Build directory was not found: $buildDir"
+          }
+
+          if (-not (Test-Path $binDir)) {
+            throw "Bin directory was not found: $binDir"
+          }
+
+          if (-not (Test-Path $blenderExe)) {
+            Write-Host ""
+            Write-Host "Available executables:"
+
+            Get-ChildItem `
+              -Path $binDir `
+              -Filter "*.exe" `
+              -Recurse |
               Select-Object FullName
 
-            exit 1
+            throw "blender.exe was not found: $blenderExe"
           }
 
-          foreach ($package in $packages) {
-            Copy-Item $package.FullName artifacts\
+          Write-Host ""
+          Write-Host "Goo Engine executable found:"
+          Write-Host $blenderExe
+
+          Write-Host ""
+          Write-Host "Build files:"
+          Get-ChildItem `
+            -Path $binDir `
+            -Recurse |
+            Select-Object FullName, Length
+
+      # ============================================================
+      # PACKAGE
+      # ============================================================
+
+      - name: Package Goo Engine
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $buildDir = Join-Path `
+            $env:GITHUB_WORKSPACE `
+            "..\build_windows_Release_x64_vc17_Release"
+
+          $binDir = Join-Path $buildDir "bin"
+
+          if (-not (Test-Path $binDir)) {
+            throw "Build output not found: $binDir"
           }
 
-          Get-ChildItem artifacts
+          $blenderExe = Join-Path $binDir "blender.exe"
+
+          if (-not (Test-Path $blenderExe)) {
+            throw "blender.exe was not found: $blenderExe"
+          }
+
+          # ----------------------------------------------------------
+          # Create artifacts directory
+          # ----------------------------------------------------------
+
+          $artifactsDir = Join-Path `
+            $env:GITHUB_WORKSPACE `
+            "artifacts"
+
+          if (Test-Path $artifactsDir) {
+            Remove-Item `
+              $artifactsDir `
+              -Recurse `
+              -Force
+          }
+
+          New-Item `
+            -ItemType Directory `
+            -Path $artifactsDir `
+            -Force |
+            Out-Null
+
+          # ----------------------------------------------------------
+          # Temporary package directory
+          # ----------------------------------------------------------
+
+          $packageRoot = Join-Path `
+            $env:GITHUB_WORKSPACE `
+            "goo-engine-package"
+
+          if (Test-Path $packageRoot) {
+            Remove-Item `
+              $packageRoot `
+              -Recurse `
+              -Force
+          }
+
+          New-Item `
+            -ItemType Directory `
+            -Path $packageRoot `
+            -Force |
+            Out-Null
+
+          # ----------------------------------------------------------
+          # Copy complete installed Blender/Goo Engine tree
+          # ----------------------------------------------------------
+
+          Write-Host "Copying Goo Engine files..."
+
+          Copy-Item `
+            -Path "$binDir\*" `
+            -Destination $packageRoot `
+            -Recurse `
+            -Force
+
+          # ----------------------------------------------------------
+          # Verify blender.exe exists inside package
+          # ----------------------------------------------------------
+
+          $packagedExe = Join-Path `
+            $packageRoot `
+            "blender.exe"
+
+          if (-not (Test-Path $packagedExe)) {
+            throw "blender.exe was not copied into package."
+          }
+
+          # ----------------------------------------------------------
+          # Create ZIP
+          # ----------------------------------------------------------
+
+          $zipPath = Join-Path `
+            $artifactsDir `
+            "goo-engine-4.4.3-windows-x64.zip"
+
+          if (Test-Path $zipPath) {
+            Remove-Item `
+              $zipPath `
+              -Force
+          }
+
+          Write-Host ""
+          Write-Host "Creating ZIP:"
+          Write-Host $zipPath
+
+          Compress-Archive `
+            -Path "$packageRoot\*" `
+            -DestinationPath $zipPath `
+            -CompressionLevel Optimal
+
+          if (-not (Test-Path $zipPath)) {
+            throw "ZIP was not created."
+          }
+
+          # ----------------------------------------------------------
+          # ZIP information
+          # ----------------------------------------------------------
+
+          $zipInfo = Get-Item $zipPath
+
+          Write-Host ""
+          Write-Host "Package created successfully:"
+          Write-Host $zipInfo.FullName
+          Write-Host "Size: $([math]::Round($zipInfo.Length / 1MB, 2)) MB"
+
+          # ----------------------------------------------------------
+          # Cleanup temporary package
+          # ----------------------------------------------------------
+
+          Remove-Item `
+            $packageRoot `
+            -Recurse `
+            -Force
+
+      # ============================================================
+      # VERIFY ZIP
+      # ============================================================
+
+      - name: Verify ZIP package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $zipPath = Join-Path `
+            $env:GITHUB_WORKSPACE `
+            "artifacts\goo-engine-4.4.3-windows-x64.zip"
+
+          if (-not (Test-Path $zipPath)) {
+            throw "ZIP package was not found."
+          }
+
+          $testDir = Join-Path `
+            $env:RUNNER_TEMP `
+            "goo-engine-package-test"
+
+          if (Test-Path $testDir) {
+            Remove-Item `
+              $testDir `
+              -Recurse `
+              -Force
+          }
+
+          New-Item `
+            -ItemType Directory `
+            -Path $testDir `
+            -Force |
+            Out-Null
+
+          Write-Host "Testing ZIP integrity..."
+
+          Expand-Archive `
+            -Path $zipPath `
+            -DestinationPath $testDir `
+            -Force
+
+          $testExe = Join-Path `
+            $testDir `
+            "blender.exe"
+
+          if (-not (Test-Path $testExe)) {
+            Write-Host ""
+            Write-Host "ZIP contents:"
+
+            Get-ChildItem `
+              -Path $testDir `
+              -Recurse |
+              Select-Object FullName
+
+            throw "blender.exe was not found inside ZIP."
+          }
+
+          Write-Host ""
+          Write-Host "ZIP verification successful."
+          Write-Host "Executable:"
+          Write-Host $testExe
+
+      # ============================================================
+      # SHA256
+      # ============================================================
 
       - name: Generate SHA256
         shell: pwsh
         run: |
-          $packages = Get-ChildItem artifacts -File
+          $ErrorActionPreference = "Stop"
 
-          foreach ($file in $packages) {
-            $hash = (Get-FileHash $file.FullName -Algorithm SHA256).Hash.ToLower()
-            "$hash  $($file.Name)" |
-              Out-File -Append -Encoding ascii artifacts\SHA256SUMS.txt
+          $zipPath = Join-Path `
+            $env:GITHUB_WORKSPACE `
+            "artifacts\goo-engine-4.4.3-windows-x64.zip"
+
+          if (-not (Test-Path $zipPath)) {
+            throw "ZIP package was not found."
           }
 
-          Get-Content artifacts\SHA256SUMS.txt
+          $hash = (
+            Get-FileHash `
+              $zipPath `
+              -Algorithm SHA256
+          ).Hash.ToLower()
+
+          $line = "$hash  goo-engine-4.4.3-windows-x64.zip"
+
+          $checksumPath = Join-Path `
+            $env:GITHUB_WORKSPACE `
+            "artifacts\SHA256SUMS.txt"
+
+          Set-Content `
+            -Path $checksumPath `
+            -Value $line `
+            -Encoding ascii
+
+          Write-Host ""
+          Write-Host "SHA256:"
+          Get-Content $checksumPath
+
+      # ============================================================
+      # UPLOAD ARTIFACT
+      # ============================================================
 
       - name: Upload Windows artifact
         uses: actions/upload-artifact@v4
