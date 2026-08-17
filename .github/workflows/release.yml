@@ -1,0 +1,153 @@
+name: Goo Engine 4.4 Release
+
+on:
+  push:
+    tags:
+      - 'goo-engine-v4.4.*'
+
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag, for example goo-engine-v4.4.3'
+        required: true
+        default: goo-engine-v4.4.3
+
+permissions:
+  contents: write
+
+env:
+  GOO_ENGINE_BRANCH: goo-engine-v4.4-release
+  BLENDER_VERSION: 4.4.3
+  DEBIAN_FRONTEND: noninteractive
+
+jobs:
+  release-linux:
+    name: Build and publish Goo Engine 4.4.3 - Linux x64
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+
+    steps:
+      - name: Resolve release tag
+        id: release
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout release source
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ steps.release.outputs.tag }}
+          fetch-depth: 0
+          submodules: false
+          lfs: false
+
+      - name: Verify Goo Engine 4.4
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          version=$(sed -n \
+            's/^#define BLENDER_VERSION / /p' \
+            source/blender/blenkernel/BKE_blender_version.h | tr -d ' ')
+
+          patch=$(sed -n \
+            's/^#define BLENDER_VERSION_PATCH / /p' \
+            source/blender/blenkernel/BKE_blender_version.h | tr -d ' ')
+
+          echo "Version: ${version}.${patch}"
+
+          test "$version" = "404"
+          test "$patch" = "3"
+
+      - name: Install build tools
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          sudo apt-get update
+
+          sudo apt-get install -y \
+            build-essential \
+            git \
+            git-lfs \
+            cmake \
+            ninja-build \
+            python3 \
+            python3-dev \
+            python3-pip \
+            pkg-config \
+            ccache \
+            patchelf \
+            libxi-dev \
+            libxrender-dev \
+            libxfixes-dev \
+            libx11-dev \
+            libxext-dev \
+            libxrandr-dev \
+            libxinerama-dev \
+            libxcursor-dev \
+            libwayland-dev \
+            libegl1-mesa-dev \
+            libgl1-mesa-dev
+
+          git lfs install --skip-repo
+
+      - name: Fetch Goo Engine dependencies
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python3 ./build_files/utils/make_update.py --use-linux-libraries
+
+      - name: Configure ccache
+        shell: bash
+        run: |
+          echo "CCACHE_DIR=${{ github.workspace }}/.ccache" >> "$GITHUB_ENV"
+          ccache --version
+          ccache --zero-stats
+
+      - name: Build
+        shell: bash
+        env:
+          CCACHE_DIR: ${{ github.workspace }}/.ccache
+        run: |
+          set -euxo pipefail
+
+          make release ninja ccache NPROCS=$(nproc)
+          make package_archive ninja ccache NPROCS=$(nproc)
+
+      - name: Collect release files
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          mkdir -p release-assets
+
+          find .. -maxdepth 4 -type f \
+            \( -name 'blender-4.4.3-*.tar.xz' -o -name 'blender-4.4.3-*.zip' \) \
+            -print -exec cp {} release-assets/ \;
+
+          if ! compgen -G 'release-assets/*' > /dev/null; then
+            echo "No packaged release archive was found."
+            exit 1
+          fi
+
+          sha256sum release-assets/* > release-assets/SHA256SUMS.txt
+
+          cat release-assets/SHA256SUMS.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.release.outputs.tag }}
+          name: Goo Engine 4.4.3
+          generate_release_notes: true
+          draft: false
+          prerelease: false
+          files: |
+            release-assets/*
