@@ -26,7 +26,6 @@ jobs:
   build-windows:
     name: Build Goo Engine 4.4.3 - Windows x64
     runs-on: windows-2022
-
     timeout-minutes: 360
 
     steps:
@@ -50,11 +49,12 @@ jobs:
           git config --global protocol.version 2
           git config --global core.longpaths true
 
-      - name: Check Visual Studio
+      - name: Verify Visual Studio
         shell: pwsh
         run: |
-          Write-Host "Visual Studio installation:"
-          & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" `
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+
+          & $vswhere `
             -latest `
             -products * `
             -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
@@ -65,78 +65,74 @@ jobs:
         run: |
           python .\build_files\utils\make_update.py
 
-      - name: Configure MSVC environment
+      - name: Build Goo Engine
         shell: cmd
         run: |
-          call "%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath > vs_path.txt
-          set /p VS_PATH=<vs_path.txt
+          setlocal
+
+          for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do (
+            set "VS_PATH=%%i"
+          )
+
           call "%VS_PATH%\VC\Auxiliary\Build\vcvars64.bat"
+
           cl
           cmake --version
           ninja --version
 
-      - name: Configure ccache
-        shell: pwsh
-        run: |
-          ccache --version
-          ccache --zero-stats
-
-      - name: Cache compiler data
-        uses: actions/cache@v4
-        with:
-          path: |
-            C:\Users\runneradmin\.ccache
-          key: goo-engine-4.4-windows-${{ hashFiles('CMakeLists.txt', 'GNUmakefile', 'source/**') }}
-          restore-keys: |
-            goo-engine-4.4-windows-
-
-      - name: Build Goo Engine
-        shell: cmd
-        run: |
-          call "%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath > vs_path.txt
-          set /p VS_PATH=<vs_path.txt
-          call "%VS_PATH%\VC\Auxiliary\Build\vcvars64.bat"
-
-          call make.bat release ninja ccache
+          call make.bat release ninja
 
       - name: Package Goo Engine
         shell: cmd
         run: |
-          call "%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath > vs_path.txt
-          set /p VS_PATH=<vs_path.txt
+          setlocal
+
+          for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do (
+            set "VS_PATH=%%i"
+          )
+
           call "%VS_PATH%\VC\Auxiliary\Build\vcvars64.bat"
 
           call make.bat package
 
-      - name: Collect Windows build
+      - name: Find Windows package
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path artifacts | Out-Null
 
-          $files = Get-ChildItem -Path . -Recurse -File |
+          $packages = Get-ChildItem -Path . -Recurse -File |
             Where-Object {
-              $_.Name -match '^blender-4\.4\.3.*\.zip$' -or
-              $_.Name -match '^blender.*windows.*\.zip$'
+              $_.Extension -eq ".zip" -and
+              $_.Name -match "blender|goo"
             }
 
-          if ($files.Count -eq 0) {
-            Write-Host "No packaged Windows archive found."
+          if ($packages.Count -eq 0) {
+            Write-Host "No ZIP package was found."
+
             Get-ChildItem -Path . -Recurse -File |
-              Where-Object { $_.Name -match 'blender.*\.(zip|exe)$' } |
+              Where-Object {
+                $_.Extension -in ".exe", ".zip"
+              } |
               Select-Object FullName
+
             exit 1
           }
 
-          foreach ($file in $files) {
-            Copy-Item $file.FullName artifacts\
+          foreach ($package in $packages) {
+            Copy-Item $package.FullName artifacts\
           }
 
-          $checksums = Get-ChildItem artifacts\* |
-            Where-Object { -not $_.Name.EndsWith("SHA256SUMS.txt") }
+          Get-ChildItem artifacts
 
-          foreach ($file in $checksums) {
+      - name: Generate SHA256
+        shell: pwsh
+        run: |
+          $packages = Get-ChildItem artifacts -File
+
+          foreach ($file in $packages) {
             $hash = (Get-FileHash $file.FullName -Algorithm SHA256).Hash.ToLower()
-            "$hash  $($file.Name)" | Out-File -Append -Encoding ascii artifacts\SHA256SUMS.txt
+            "$hash  $($file.Name)" |
+              Out-File -Append -Encoding ascii artifacts\SHA256SUMS.txt
           }
 
           Get-Content artifacts\SHA256SUMS.txt
