@@ -1,4 +1,4 @@
-name: Goo Engine 4.4 Release
+name: Goo Engine 4.4 Windows Release
 
 on:
   push:
@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Release tag, for example goo-engine-v4.4.3'
+        description: 'Release tag, example: goo-engine-v4.4.3'
         required: true
         default: goo-engine-v4.4.3
 
@@ -16,30 +16,28 @@ permissions:
   contents: write
 
 env:
-  GOO_ENGINE_BRANCH: goo-engine-v4.4-release
-  BLENDER_VERSION: 4.4.3
-  DEBIAN_FRONTEND: noninteractive
+  GOO_ENGINE_VERSION: 4.4.3
 
 jobs:
-  release-linux:
-    name: Build and publish Goo Engine 4.4.3 - Linux x64
-    runs-on: ubuntu-24.04
+  release-windows:
+    name: Build Goo Engine 4.4.3 - Windows x64
+    runs-on: windows-2022
+
     timeout-minutes: 360
 
     steps:
       - name: Resolve release tag
         id: release
-        shell: bash
+        shell: pwsh
         run: |
-          set -euxo pipefail
+          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
+            "tag=${{ inputs.tag }}" >> $env:GITHUB_OUTPUT
+          }
+          else {
+            "tag=$env:GITHUB_REF_NAME" >> $env:GITHUB_OUTPUT
+          }
 
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            echo "tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Checkout release source
+      - name: Checkout Goo Engine
         uses: actions/checkout@v5
         with:
           ref: ${{ steps.release.outputs.tag }}
@@ -47,105 +45,116 @@ jobs:
           submodules: false
           lfs: false
 
-      - name: Verify Goo Engine 4.4
-        shell: bash
+      - name: Setup Git LFS
+        shell: pwsh
         run: |
-          set -euxo pipefail
-
-          version=$(sed -n \
-            's/^#define BLENDER_VERSION / /p' \
-            source/blender/blenkernel/BKE_blender_version.h | tr -d ' ')
-
-          patch=$(sed -n \
-            's/^#define BLENDER_VERSION_PATCH / /p' \
-            source/blender/blenkernel/BKE_blender_version.h | tr -d ' ')
-
-          echo "Version: ${version}.${patch}"
-
-          test "$version" = "404"
-          test "$patch" = "3"
-
-      - name: Install build tools
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          sudo apt-get update
-
-          sudo apt-get install -y \
-            build-essential \
-            git \
-            git-lfs \
-            cmake \
-            ninja-build \
-            python3 \
-            python3-dev \
-            python3-pip \
-            pkg-config \
-            ccache \
-            patchelf \
-            libxi-dev \
-            libxrender-dev \
-            libxfixes-dev \
-            libx11-dev \
-            libxext-dev \
-            libxrandr-dev \
-            libxinerama-dev \
-            libxcursor-dev \
-            libwayland-dev \
-            libegl1-mesa-dev \
-            libgl1-mesa-dev
-
           git lfs install --skip-repo
 
+      - name: Verify Goo Engine version
+        shell: pwsh
+        run: |
+          $file = "source\blender\blenkernel\BKE_blender_version.h"
+
+          $version = Select-String `
+            -Path $file `
+            -Pattern '^#define BLENDER_VERSION ' |
+            ForEach-Object { $_.Line -replace '.*BLENDER_VERSION\s+', '' }
+
+          $patch = Select-String `
+            -Path $file `
+            -Pattern '^#define BLENDER_VERSION_PATCH ' |
+            ForEach-Object { $_.Line -replace '.*BLENDER_VERSION_PATCH\s+', '' }
+
+          Write-Host "Detected Blender version: $version.$patch"
+
+          if ($version -ne "404") {
+            throw "Expected Blender 4.4"
+          }
+
+          if ($patch -ne "3") {
+            throw "Expected patch version 3"
+          }
+
+      - name: Configure Git
+        shell: pwsh
+        run: |
+          git config --global advice.detachedHead false
+          git config --global protocol.version 2
+          git config --global core.longpaths true
+
+      - name: Check Visual Studio
+        shell: pwsh
+        run: |
+          & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" `
+            -latest `
+            -products * `
+            -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+            -property installationPath
+
       - name: Fetch Goo Engine dependencies
-        shell: bash
+        shell: pwsh
         run: |
-          set -euxo pipefail
-          python3 ./build_files/utils/make_update.py --use-linux-libraries
+          python .\build_files\utils\make_update.py
 
-      - name: Configure ccache
-        shell: bash
+      - name: Build Goo Engine
+        shell: cmd
         run: |
-          echo "CCACHE_DIR=${{ github.workspace }}/.ccache" >> "$GITHUB_ENV"
-          ccache --version
-          ccache --zero-stats
+          call "%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath > vs_path.txt
+          set /p VS_PATH=<vs_path.txt
+          call "%VS_PATH%\VC\Auxiliary\Build\vcvars64.bat"
 
-      - name: Build
-        shell: bash
-        env:
-          CCACHE_DIR: ${{ github.workspace }}/.ccache
+          call make.bat release ninja
+
+      - name: Package Goo Engine
+        shell: cmd
         run: |
-          set -euxo pipefail
+          call "%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath > vs_path.txt
+          set /p VS_PATH=<vs_path.txt
+          call "%VS_PATH%\VC\Auxiliary\Build\vcvars64.bat"
 
-          make release ninja ccache NPROCS=$(nproc)
-          make package_archive ninja ccache NPROCS=$(nproc)
+          call make.bat package
 
-      - name: Collect release files
-        shell: bash
+      - name: Collect Windows release
+        shell: pwsh
         run: |
-          set -euxo pipefail
+          New-Item -ItemType Directory -Force -Path release-assets | Out-Null
 
-          mkdir -p release-assets
+          $files = Get-ChildItem -Path . -Recurse -File |
+            Where-Object {
+              $_.Name -match '^blender-4\.4\.3.*\.zip$' -or
+              $_.Name -match '^blender.*windows.*\.zip$'
+            }
 
-          find .. -maxdepth 4 -type f \
-            \( -name 'blender-4.4.3-*.tar.xz' -o -name 'blender-4.4.3-*.zip' \) \
-            -print -exec cp {} release-assets/ \;
+          if ($files.Count -eq 0) {
+            Write-Host "No Windows release archive found."
 
-          if ! compgen -G 'release-assets/*' > /dev/null; then
-            echo "No packaged release archive was found."
+            Get-ChildItem -Path . -Recurse -File |
+              Where-Object { $_.Name -match 'blender.*\.(zip|exe)$' } |
+              Select-Object FullName
+
             exit 1
-          fi
+          }
 
-          sha256sum release-assets/* > release-assets/SHA256SUMS.txt
+          foreach ($file in $files) {
+            Copy-Item $file.FullName release-assets\
+          }
 
-          cat release-assets/SHA256SUMS.txt
+          $checksums = Get-ChildItem release-assets\* |
+            Where-Object { -not $_.Name.EndsWith("SHA256SUMS.txt") }
+
+          foreach ($file in $checksums) {
+            $hash = (Get-FileHash $file.FullName -Algorithm SHA256).Hash.ToLower()
+            "$hash  $($file.Name)" |
+              Out-File -Append -Encoding ascii release-assets\SHA256SUMS.txt
+          }
+
+          Get-Content release-assets\SHA256SUMS.txt
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.release.outputs.tag }}
-          name: Goo Engine 4.4.3
+          name: Goo Engine 4.4.3 Windows
           generate_release_notes: true
           draft: false
           prerelease: false
